@@ -31,8 +31,35 @@ class ToolRegistry:
         except Exception as e:
             return f"Error executing tool '{name}': {str(e)}"
 
+    def execute_with_timeout(self, name: str, kwargs: Dict[str, Any], timeout_seconds: int = 60) -> str:
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(self.execute, name, kwargs)
+            try:
+                return future.result(timeout=timeout_seconds)
+            except concurrent.futures.TimeoutError:
+                return f'Tool {name} timed out after {timeout_seconds}s — operation cancelled.'
+            except Exception as exc:
+                return f'Tool {name} error: {exc}'
+
 # Global registry for AI tools
 registry = ToolRegistry()
+
+def _extract_result(raw_result: Any) -> str:
+    import json
+    if isinstance(raw_result, dict) and 'clean_output' in raw_result:
+        text = str(raw_result['clean_output'])
+    elif not isinstance(raw_result, str):
+        try:
+            text = json.dumps(raw_result)
+        except Exception:
+            text = str(raw_result)
+    else:
+        text = str(raw_result)
+    
+    if len(text) > 2800:
+        text = text[:2800] + f"\n…[truncated {len(text) - 2800} chars]"
+    return text
 
 # Example Tool: List Targets
 @registry.register(
@@ -971,3 +998,47 @@ def list_sessions(target_id: str) -> str:
         except Exception:
             continue
     return "\n".join(rows) if rows else "No sessions found."
+
+@registry.register(
+    name='review_finding',
+    description='Mark a finding with a review status: new, confirmed, false_positive, or exploited.',
+    parameters={
+        'type': 'object',
+        'properties': {
+            'target_id': {'type': 'string'},
+            'session_id': {'type': 'string', 'description': 'Session ID (first 8 chars OK)'},
+            'finding_id': {'type': 'string'},
+            'status': {'type': 'string', 'enum': ['new', 'confirmed', 'false_positive', 'exploited']},
+        },
+        'required': ['target_id', 'finding_id', 'status'],
+    }
+)
+def review_finding(target_id: str, finding_id: str, status: str, session_id: str = None) -> str:
+    from pathlib import Path
+    from sqlx.target.manager import TargetManager
+    from sqlx.session.persistence import SessionPersistence
+    from sqlx.session.manager import SessionManager
+
+    target = TargetManager().load_target(target_id)
+    if not target:
+        return f"Target '{target_id}' not found."
+
+    persistence = SessionPersistence()
+    sessions = persistence.list_sessions(target.workspace_dir)
+    if not sessions:
+        return 'No sessions found for this target.'
+
+    # Match by session_id prefix if provided
+    session = None
+    if session_id:
+        session = next((s for s in sessions if s.id.startswith(session_id)), None)
+    if session is None:
+        session = sessions[-1]  # latest session
+
+    try:
+        session.set_finding_status(finding_id, status)
+    except ValueError as e:
+        return str(e)
+
+    SessionManager().save(session, target.workspace_dir)
+    return f"Finding '{finding_id}' in session {session.id[:8]} marked as '{status}'."

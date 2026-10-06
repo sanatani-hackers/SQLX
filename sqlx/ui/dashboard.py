@@ -43,8 +43,9 @@ def _make_pt_session():
 # ─────────────────────────────────────────────────────────────────────────────
 
 class InteractiveDashboard:
-    def __init__(self, agent: SQLXAgent, active_target=None):
+    def __init__(self, agent: SQLXAgent, active_target=None, auto_approve: bool = False):
         self.agent = agent
+        self.agent.auto_approve = auto_approve
         self.target_manager = TargetManager()
         self.active_target = active_target
         self._pt_session = _make_pt_session()
@@ -147,6 +148,10 @@ class InteractiveDashboard:
             title="[bold blue]AI Agent[/bold blue]",
             border_style="blue",
         ))
+        
+        if self.agent.active_session is not None:
+            s = self.agent.active_session
+            console.print(f"[dim]Session: {s.id[:8]} | Findings: {len(s.findings)} | Observations: {len(s.observations)}[/dim]")
 
     # ── /help ──────────────────────────────────────────────────────────────────
 
@@ -223,11 +228,13 @@ class InteractiveDashboard:
             return
         console.print(Panel(
             f"[bold]ID:[/bold]           {s.id}\n"
+            f"[bold]Target ID:[/bold]    {s.target_id}\n"
             f"[bold]Objective:[/bold]    {s.objective}\n"
             f"[bold]Status:[/bold]       {s.status}\n"
             f"[bold]Findings:[/bold]     {len(s.findings)}\n"
             f"[bold]Observations:[/bold] {len(s.observations)}\n"
-            f"[bold]Revision:[/bold]     {s.workspace_revision or 'N/A'}",
+            f"[bold]Revision:[/bold]     {s.workspace_revision or 'N/A'}\n"
+            f"[bold]Updated:[/bold]      {s.last_updated}",
             title="[bold cyan]Active Session[/bold cyan]",
             border_style="cyan",
         ))

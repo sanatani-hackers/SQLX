@@ -210,9 +210,20 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     "headers": dict(response.headers),
                     "body": resp_body
                 }
-                
-                bus.publish("ProxyResponseReceived", {"req_data": req_data, "res_data": res_data})
-                
+
+                # Emit event and capture the stored record's ID for logging
+                event_payload = {"req_data": req_data, "res_data": res_data}
+                bus.publish("ProxyResponseReceived", event_payload)
+
+                # Log with request ID if history is available
+                try:
+                    from sqlx import proxy_history
+                    recent = proxy_history.get_recent(1)
+                    rid = recent[0]["id"] if recent else "?"
+                    print(f"  [ID={rid}] \u2192 {req_data['method']} {req_data['url']}", flush=True)
+                except Exception:
+                    print(f"  \u2192 {req_data['method']} {req_data['url']}", flush=True)
+
                 if hasattr(self.server, "on_response"):
                     self.server.on_response(res_data)
                     

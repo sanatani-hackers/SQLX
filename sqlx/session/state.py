@@ -104,6 +104,18 @@ class SessionState(BaseModel):
             "corresponds to a single SQLMap invocation."
         ),
     )
+    memory_snapshot: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Snapshot of the agent's memory (message history).",
+    )
+    observation_types: Dict[str, List[str]] = Field(
+        default_factory=dict,
+        description="Categorized observations (type -> list of observations).",
+    )
+    finding_statuses: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Review status for findings (finding_id -> status).",
+    )
 
     # ------------------------------------------------------------------
     # Workspace tracking
@@ -157,6 +169,29 @@ class SessionState(BaseModel):
         """
         self.sqlmap_args_history.append(list(args))
         self.touch()
+
+    def add_typed_observation(self, obs_type: str, text: str) -> None:
+        """Record an observation under a typed category (analysis, planning, execution, validation)."""
+        self.observation_types.setdefault(obs_type, []).append(text)
+        self.observations.append(f"[{obs_type}] {text}")
+        self.touch()
+
+    def set_finding_status(self, finding_id: str, status: str) -> None:
+        """Set finding review status: new, confirmed, false_positive, exploited."""
+        valid = {'new', 'confirmed', 'false_positive', 'exploited'}
+        if status not in valid:
+            raise ValueError(f'Invalid status {status!r}. Must be one of {valid}')
+        self.finding_statuses[finding_id] = status
+        self.touch()
+
+    def snapshot_memory(self, messages: List[Dict[str, Any]]) -> None:
+        """Store a snapshot of the current agent message history."""
+        self.memory_snapshot = list(messages)
+        self.touch()
+
+    def restore_memory(self) -> List[Dict[str, Any]]:
+        """Return the stored agent message history snapshot."""
+        return list(self.memory_snapshot)
 
     # ------------------------------------------------------------------
     # Pydantic config

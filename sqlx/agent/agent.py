@@ -73,21 +73,6 @@ def _response_has_finding(text: str) -> bool:
     return any(kw in lower for kw in _FINDING_KEYWORDS)
 
 
-def _extract_result(raw_result: Any) -> str:
-    """
-    If the tool returned a dict with 'clean_output', use that.
-    Otherwise stringify as usual.  Always cap at 2800 chars.
-    """
-    if isinstance(raw_result, dict):
-        text = raw_result.get("clean_output") or str(raw_result)
-    else:
-        text = str(raw_result)
-
-    if len(text) > 2800:
-        text = text[:2800] + f"\n…[truncated {len(text) - 2800} chars]"
-    return text
-
-
 def _call_key(tool_name: str, kwargs: Dict[str, Any]) -> tuple:
     """Hashable cache key for a tool call."""
     try:
@@ -101,18 +86,7 @@ def _call_key(tool_name: str, kwargs: Dict[str, Any]) -> tuple:
 # Session state stub
 # ---------------------------------------------------------------------------
 
-class SessionState:
-    """Minimal session context that can be attached to the agent."""
-
-    def __init__(self, session_id: str, objective: str, findings: Optional[list] = None) -> None:
-        self.session_id: str = session_id
-        self.id: str = session_id          # alias expected by set_session
-        self.objective: str = objective
-        self.findings: list = findings or []
-
-    @property
-    def findings_count(self) -> int:
-        return len(self.findings)
+from sqlx.session.state import SessionState
 
 
 # ---------------------------------------------------------------------------
@@ -133,20 +107,38 @@ class SQLXAgent:
         self,
         provider: Optional[LLMProvider] = None,
         max_iterations: int = 12,
+        auto_approve: bool = False,
     ) -> None:
         self.provider: LLMProvider = provider or DummyProvider()
         self.memory: AgentMemory = AgentMemory()
         self.max_iterations: int = max_iterations
+        self.auto_approve: bool = auto_approve
         self.active_session: Optional[SessionState] = None
+        self._session_workspace_dir: Optional[str] = None
 
         self.memory.add_system_message(_load_system_prompt())
+
+    def ask_for_approval(self, action: str, risk_level: str = 'medium') -> bool:
+        if self.auto_approve:
+            return True
+        try:
+            from rich.panel import Panel
+            from rich import print as rprint
+            import rich.prompt
+            
+            rprint(Panel(f"[bold red]Action:[/bold red] {action}\n[bold yellow]Risk Level:[/bold yellow] {risk_level}", title="Approval Required"))
+            choice = rich.prompt.Prompt.ask('[A]pprove / [D]eny?', choices=['a','d'], default='d')
+            return choice.lower() == 'a'
+        except (KeyboardInterrupt, EOFError):
+            return False
 
     # ------------------------------------------------------------------
     # Session
     # ------------------------------------------------------------------
 
-    def set_session(self, session: SessionState) -> None:
+    def set_session(self, session: SessionState, workspace_dir: str) -> None:
         self.active_session = session
+        self._session_workspace_dir = workspace_dir
         ctx = (
             f"Session context — ID: {session.id}\n"
             f"Objective: {session.objective}\n"
@@ -200,11 +192,10 @@ class SQLXAgent:
     # Core loop
     # ------------------------------------------------------------------
 
-    def ask(self, query: str) -> str:
-        """Drive the agentic loop for one user query and return the final answer."""
-        from sqlx.agent.tools import registry
+    def _ask_internal(self, query: str) -> str:
+        from sqlx.agent.tools import registry, _extract_result
+        RISKY_TOOLS = {'apply_workspace_patch', 'write_workspace_file', 'rollback_workspace', 'edit_workspace_file'}
 
-        self.memory.add_user_message(query)
 
         # --- RAG: prepend relevant past findings as a temporary system message ---
         rag_ctx = self._get_rag_context(query)
@@ -278,7 +269,18 @@ class SQLXAgent:
                     except ImportError:
                         logger.info("Agent calling tool: %s(%s)", tool_name, kwargs)
 
-                    raw = registry.execute(tool_name, kwargs)
+                    if tool_name in RISKY_TOOLS:
+                        if not self.ask_for_approval(f'Agent wants to run {tool_name} with args: {kwargs}', risk_level='high'):
+                            result = 'Action denied by user.'
+                            seen_calls[ckey] = result
+                            self.memory.messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": result,
+                            })
+                            continue
+
+                    raw = registry.execute_with_timeout(tool_name, kwargs, timeout_seconds=120)
                     result = _extract_result(raw)
                     seen_calls[ckey] = result
 
@@ -317,6 +319,26 @@ class SQLXAgent:
                 "I completed multiple tool calls but could not produce a final summary. "
                 "Check the tool outputs above for details."
             )
+
+    def ask(self, query: str) -> str:
+        """Drive the agentic loop for one user query and return the final answer."""
+        if self.active_session is not None and self.active_session.memory_snapshot:
+            if len(self.memory.messages) <= 2:
+                self.memory.messages = self.active_session.restore_memory()
+
+        self.memory.add_user_message(query)
+        final_response = self._ask_internal(query)
+
+        if self.active_session is not None:
+            self.active_session.snapshot_memory(self.memory.get_all())
+            self.active_session.add_typed_observation('execution', f'Agent answered query: {query[:100]}')
+            if _response_has_finding(final_response):
+                self.active_session.add_typed_observation('analysis', final_response[:300])
+            if self._session_workspace_dir:
+                from sqlx.session.manager import SessionManager
+                SessionManager().save(self.active_session, self._session_workspace_dir)
+
+        return final_response
 
     # ------------------------------------------------------------------
     # Internal helpers

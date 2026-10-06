@@ -152,6 +152,85 @@ class PayloadCorrelator:
         with self._lock:
             self._records.clear()
 
+    def correlate(self, records: list) -> list:
+        """Analyse a list of proxy history records for anomalies.
+
+        Groups records by URL path (ignoring query string) and compares
+        HTTP status codes, body lengths, and latencies across requests to
+        the same endpoint. Returns a list of finding dicts suitable for
+        display or injection into the agent's context.
+
+        Parameters
+        ----------
+        records:
+            Proxy history records as returned by ``ProxyHistory.get_all()``
+            or ``ProxyHistory.get_recent()``.
+
+        Returns
+        -------
+        list[dict] with keys ``url``, ``severity``, ``observation``, ``confidence``.
+        """
+        from urllib.parse import urlparse
+        from collections import defaultdict
+
+        # Group by URL without query string
+        groups: dict[str, list] = defaultdict(list)
+        for rec in records:
+            url = rec.get("url", "")
+            try:
+                parsed = urlparse(url)
+                key = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+            except Exception:
+                key = url
+            groups[key].append(rec)
+
+        findings = []
+        for base_url, group in groups.items():
+            if len(group) < 2:
+                continue  # need at least two requests to compare
+
+            statuses  = [r.get("status", 0) for r in group]
+            lengths   = [len(str(r.get("response_body") or "")) for r in group]
+            latencies = [float(r.get("latency_ms") or 0) for r in group]
+
+            # ── Status code changed ──────────────────────────────────────
+            if len(set(statuses)) > 1:
+                findings.append({
+                    "url":         base_url,
+                    "severity":    "HIGH",
+                    "observation": f"HTTP status varies across {len(group)} requests: {sorted(set(statuses))}",
+                    "confidence":  0.85,
+                })
+
+            # ── Body length changed significantly (>30%) ─────────────────
+            if lengths and max(lengths) > 0:
+                ratio = (max(lengths) - min(lengths)) / max(lengths)
+                if ratio > 0.30:
+                    findings.append({
+                        "url":         base_url,
+                        "severity":    "MEDIUM",
+                        "observation": (
+                            f"Response body size varies by {ratio:.0%} across "
+                            f"{len(group)} requests "
+                            f"(min={min(lengths)}B max={max(lengths)}B)"
+                        ),
+                        "confidence":  0.65,
+                    })
+
+            # ── Timing anomaly (>4 s delta) ──────────────────────────────
+            if latencies and max(latencies) - min(latencies) > 4000:
+                findings.append({
+                    "url":         base_url,
+                    "severity":    "HIGH",
+                    "observation": (
+                        f"Latency delta {max(latencies)-min(latencies):.0f}ms "
+                        f"across {len(group)} requests — possible time-based anomaly"
+                    ),
+                    "confidence":  0.90,
+                })
+
+        return findings
+
     # ------------------------------------------------------------------
     # Event bus integration
     # ------------------------------------------------------------------
