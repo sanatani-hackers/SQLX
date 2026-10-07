@@ -133,11 +133,14 @@ class SQLMapRunner:
 
         from sqlx.sqlmap.cleaner import SQLMapOutputCleaner
         cleaner = SQLMapOutputCleaner()
+        findings = cleaner.to_findings(self._all_lines)
         return {
-            "raw_lines": list(self._all_lines),
+            "raw_lines":    list(self._all_lines),
             "clean_output": cleaner.clean(self._all_lines),
-            "summary": cleaner.summarize(self._all_lines),
-            "exit_code": exit_code,
+            "summary":      cleaner.summarize(self._all_lines),
+            "findings":     findings,                        # List[Finding]
+            "findings_dicts": [f.to_dict() for f in findings],  # JSON-serializable
+            "exit_code":    exit_code,
         }
 
     def save_output_to_file(self, filepath: Path) -> None:

@@ -13,7 +13,89 @@ SQLMapOutputParser
 from __future__ import annotations
 
 import re
-from typing import Optional
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from enum import Enum
+from typing import List, Optional
+
+# ---------------------------------------------------------------------------
+# Typed result objects
+# ---------------------------------------------------------------------------
+
+class InjectionType(str, Enum):
+    """Canonical injection technique names (mirrors SQLMap's Type: field)."""
+    BOOLEAN  = "boolean-based blind"
+    TIME     = "time-based blind"
+    UNION    = "UNION query"
+    ERROR    = "error-based"
+    STACKED  = "stacked queries"
+    INLINE   = "inline query"
+    UNKNOWN  = "unknown"
+
+    @classmethod
+    def from_string(cls, s: str) -> "InjectionType":
+        s_lower = s.lower()
+        for member in cls:
+            if member.value in s_lower:
+                return member
+        return cls.UNKNOWN
+
+
+@dataclass
+class Finding:
+    """A single confirmed SQL injection point extracted from sqlmap output.
+
+    This is the typed alternative to parsing LLM-visible text strings —
+    every field is directly usable by the agent decision layer without
+    any further text processing.
+    """
+    parameter:      str                      # e.g. "page-id"
+    injection_type: InjectionType            # e.g. InjectionType.TIME
+    payload:        str         = ""         # the winning payload string
+    dbms:           Optional[str] = None     # e.g. "MySQL >= 5.0"
+    os:             Optional[str] = None     # e.g. "Linux"
+    technologies:   List[str]   = field(default_factory=list)
+    waf_detected:   bool        = False
+    tamper_scripts: List[str]   = field(default_factory=list)
+    confidence:     float       = 1.0        # 0–1; time-based = lower
+    raw_title:      str         = ""         # Title: line from sqlmap
+    discovered_at:  datetime    = field(
+        default_factory=lambda: datetime.now(tz=timezone.utc)
+    )
+
+    # ── convenience ────────────────────────────────────────────────────────
+
+    def is_exploitable(self) -> bool:
+        """True for techniques that allow direct data extraction."""
+        return self.injection_type in (
+            InjectionType.UNION, InjectionType.ERROR, InjectionType.STACKED
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "parameter":      self.parameter,
+            "injection_type": self.injection_type.value,
+            "payload":        self.payload,
+            "dbms":           self.dbms,
+            "os":             self.os,
+            "technologies":   self.technologies,
+            "waf_detected":   self.waf_detected,
+            "tamper_scripts": self.tamper_scripts,
+            "confidence":     self.confidence,
+            "raw_title":      self.raw_title,
+            "is_exploitable": self.is_exploitable(),
+            "discovered_at":  self.discovered_at.isoformat(),
+        }
+
+    def __str__(self) -> str:
+        waf = " [WAF]" if self.waf_detected else ""
+        return (
+            f"[{self.injection_type.value}]{waf} "
+            f"param={self.parameter!r} dbms={self.dbms or '?'} "
+            f"confidence={self.confidence:.0%}"
+        )
+
+
 
 # ---------------------------------------------------------------------------
 # Compiled regex patterns

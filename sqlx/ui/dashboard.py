@@ -141,7 +141,10 @@ class InteractiveDashboard:
                 f"URL: {self.active_target.target_url} | "
                 f"ID: {self.active_target.id}"
             )
-        with console.status("[bold cyan]Agent is thinking…[/bold cyan]", spinner="dots"):
+        # Always sync target_id so ObservationCollector can pull correct proxy history
+        if self.active_target:
+            self.agent.active_target_id = self.active_target.id
+        with console.status("[bold cyan]Agent is thinking…[/bold cyan]\n[dim](Collecting observations…)[/dim]", spinner="dots"):
             response = self.agent.ask(message)
         console.print(Panel(
             Markdown(response),

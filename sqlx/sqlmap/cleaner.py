@@ -141,3 +141,127 @@ class SQLMapOutputCleaner:
             "techniques": list(dict.fromkeys(m.group(1).strip() for m in _TYPE_RE.finditer(blob))),
             "errors": [m.group(1).strip() for m in _ERR_RE.finditer(blob)][:5],
         }
+
+    def to_findings(self, lines: List[str]) -> list:
+        """Convert raw sqlmap stdout into a list of typed :class:`~sqlx.sqlmap.parser.Finding` objects.
+
+        This is the primary bridge between text output and structured data,
+        replacing the need for direct SQLMap API access.  Each unique
+        (parameter, technique) pair becomes one ``Finding``.
+
+        The method pairs parameters with their techniques and payloads by
+        walking through the injection-point summary block that sqlmap always
+        emits between ``---`` delimiters.
+
+        Returns:
+            List of :class:`~sqlx.sqlmap.parser.Finding` (may be empty).
+        """
+        from sqlx.sqlmap.parser import Finding, InjectionType
+
+        blob = "\n".join(_ANSI_RE.sub("", l) for l in lines)
+        summary = self.summarize(lines)
+
+        dbms        = summary["dbms"]
+        technologies = summary["technologies"]
+        waf_detected = summary["waf_detected"]
+
+        # ── Extract tamper scripts from output ──────────────────────────────
+        _TAMPER_RE = re.compile(r"tamper script[s]?\s+'?([^'\n,]+)'?", re.IGNORECASE)
+        tamper_scripts = list(dict.fromkeys(
+            m.group(1).strip() for m in _TAMPER_RE.finditer(blob)
+        ))
+
+        # ── Walk the injection-point summary block ──────────────────────────
+        # sqlmap emits blocks like:
+        #   ---
+        #   Parameter: page-id (GET)
+        #       Type: time-based blind
+        #       Title: MySQL >= 5.0.12 AND time-based blind
+        #       Payload: page-id=1 AND SLEEP(5)
+        #   ---
+        _TITLE_RE   = re.compile(r"^\s+Title:\s+(.+)$",   re.IGNORECASE)
+        _PAYLOAD_BLOCK_RE = re.compile(r"^\s+Payload:\s+(.+)$", re.IGNORECASE)
+
+        findings: list[Finding] = []
+        in_block   = False
+        cur_param  = None
+        cur_type   = None
+        cur_title  = ""
+        cur_payload = ""
+
+        for raw in lines:
+            line = _ANSI_RE.sub("", raw).strip()
+
+            if line == "---":
+                if in_block and cur_param and cur_type:
+                    # Assign confidence based on technique
+                    itype = InjectionType.from_string(cur_type)
+                    conf = {
+                        InjectionType.UNION:   0.95,
+                        InjectionType.ERROR:   0.90,
+                        InjectionType.BOOLEAN: 0.80,
+                        InjectionType.TIME:    0.70,
+                        InjectionType.STACKED: 0.85,
+                    }.get(itype, 0.75)
+
+                    findings.append(Finding(
+                        parameter      = cur_param,
+                        injection_type = itype,
+                        payload        = cur_payload,
+                        dbms           = dbms,
+                        technologies   = technologies,
+                        waf_detected   = waf_detected,
+                        tamper_scripts = tamper_scripts,
+                        confidence     = conf,
+                        raw_title      = cur_title,
+                    ))
+                # Reset for next block
+                in_block    = True
+                cur_param   = None
+                cur_type    = None
+                cur_title   = ""
+                cur_payload = ""
+                continue
+
+            if not in_block:
+                continue
+
+            m = _PARAM_RE.match(raw)
+            if m:
+                cur_param = m.group(1).strip()
+                continue
+
+            m = _TYPE_RE.match(raw)
+            if m:
+                cur_type = m.group(1).strip()
+                continue
+
+            m = _TITLE_RE.match(raw)
+            if m:
+                cur_title = m.group(1).strip()
+                continue
+
+            m = _PAYLOAD_BLOCK_RE.match(raw)
+            if m:
+                cur_payload = m.group(1).strip()
+                continue
+
+        # ── Fallback: if no block found but injection was detected ──────────
+        if not findings and summary["injection_found"]:
+            params     = summary["parameters"] or ["unknown"]
+            techniques = summary["techniques"] or ["unknown"]
+            payloads   = summary["payloads"]
+            for i, param in enumerate(params):
+                tech_str = techniques[i] if i < len(techniques) else techniques[0] if techniques else "unknown"
+                findings.append(Finding(
+                    parameter      = param,
+                    injection_type = InjectionType.from_string(tech_str),
+                    payload        = payloads[i] if i < len(payloads) else "",
+                    dbms           = dbms,
+                    technologies   = technologies,
+                    waf_detected   = waf_detected,
+                    tamper_scripts = tamper_scripts,
+                    confidence     = 0.70,
+                ))
+
+        return findings

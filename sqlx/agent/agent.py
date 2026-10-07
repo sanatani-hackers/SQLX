@@ -115,6 +115,7 @@ class SQLXAgent:
         self.auto_approve: bool = auto_approve
         self.active_session: Optional[SessionState] = None
         self._session_workspace_dir: Optional[str] = None
+        self.active_target_id: Optional[str] = None   # set by set_session or dashboard
 
         self.memory.add_system_message(_load_system_prompt())
 
@@ -139,6 +140,7 @@ class SQLXAgent:
     def set_session(self, session: SessionState, workspace_dir: str) -> None:
         self.active_session = session
         self._session_workspace_dir = workspace_dir
+        self.active_target_id = getattr(session, "target_id", None)
         ctx = (
             f"Session context — ID: {session.id}\n"
             f"Objective: {session.objective}\n"
@@ -177,16 +179,35 @@ class SQLXAgent:
         raise RuntimeError(f"LLM call failed after {max_retries} retries: {last_exc}")
 
     # ------------------------------------------------------------------
-    # Internal: RAG context
+    # Internal: pre-load observations (replaces reactive tool calls)
     # ------------------------------------------------------------------
 
-    def _get_rag_context(self, query: str) -> str:
-        """Return relevant past-findings context string (empty if RAG unavailable)."""
+    def _collect_observations(self, query: str) -> str:
+        """Pre-load all available context before the LLM reasons.
+
+        Collects proxy traffic, session findings, workspace state, and RAG
+        results in one fast local pass and returns a compact prompt block.
+        This eliminates 2–4 redundant tool calls per turn.
+        """
         try:
-            from sqlx.ai.rag import _rag
-            return _rag.format_for_context(query, top_k=3)
-        except Exception:
-            return ""
+            from sqlx.agent.observations import ObservationCollector
+            obs = ObservationCollector().collect(
+                target_id=self.active_target_id,
+                session=self.active_session,
+                workspace_dir=self._session_workspace_dir,
+                rag_query=query,
+            )
+            if obs.is_empty():
+                return ""
+            return obs.to_prompt_text()
+        except Exception as exc:
+            logger.debug("Observation collection failed (non-fatal): %s", exc)
+            # Fall back to RAG-only context
+            try:
+                from sqlx.ai.rag import _rag
+                return _rag.format_for_context(query, top_k=3)
+            except Exception:
+                return ""
 
     # ------------------------------------------------------------------
     # Core loop
@@ -196,20 +217,29 @@ class SQLXAgent:
         from sqlx.agent.tools import registry, _extract_result
         RISKY_TOOLS = {'apply_workspace_patch', 'write_workspace_file', 'rollback_workspace', 'edit_workspace_file'}
 
-
-        # --- RAG: prepend relevant past findings as a temporary system message ---
-        rag_ctx = self._get_rag_context(query)
+        # --- Pre-load all available context BEFORE the LLM reasons --------
+        # Collects proxy traffic, session findings, workspace state, and RAG
+        # in one fast local pass — eliminates 2–4 redundant reactive tool calls.
+        obs_text = self._collect_observations(query)
         extra_messages: List[Dict[str, Any]] = []
-        if rag_ctx:
-            extra_messages = [{"role": "system", "content": rag_ctx}]
+        if obs_text:
+            extra_messages = [{"role": "system", "content": obs_text}]
 
         # Per-query state
         seen_calls: Dict[tuple, str] = {}          # call_key -> cached result
         consecutive_tool_rounds: int = 0
+        obs_refresh_counter: int = 0               # refresh observations periodically
 
         for iteration in range(self.max_iterations):
 
-            # Build effective message list: persisted memory + ephemeral RAG
+            # Refresh observations every 3 tool-call rounds so context stays current
+            if obs_refresh_counter >= 3:
+                fresh = self._collect_observations(query)
+                if fresh:
+                    extra_messages = [{"role": "system", "content": fresh}]
+                obs_refresh_counter = 0
+
+            # Build effective message list: persisted memory + ephemeral observations
             messages = self.memory.get_all() + extra_messages
 
             # --- Stuck-loop nudge -------------------------------------------
@@ -241,6 +271,7 @@ class SQLXAgent:
 
             # ---- Tool-call round -------------------------------------------
             consecutive_tool_rounds += 1
+            obs_refresh_counter += 1
             self.memory.messages.append(response.model_dump(exclude_none=True))
 
             for tool_call in response.tool_calls:

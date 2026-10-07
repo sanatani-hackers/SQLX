@@ -128,22 +128,37 @@ def run_sqlmap(target_id: str, args: List[str]) -> str:
         bus.publish('SQLMapOutputReceived', {'target_id': target_id, 'summary': result.get('summary', {})})
         
         # Return the CLEAN output, not raw
-        clean = result.get('clean_output', '')
-        summary = result.get('summary', {})
-        
+        clean    = result.get('clean_output', '')
+        summary  = result.get('summary', {})
+        findings = result.get('findings_dicts', [])   # typed Finding objects as dicts
+
         # Build a compact LLM-friendly response
         parts = []
-        if summary.get('injection_found'):
+
+        # ── Typed findings (most valuable signal) ──────────────────────────
+        if findings:
+            parts.append(f"[FINDINGS] {len(findings)} injection point(s) confirmed:")
+            for f in findings:
+                exploitable = "✓ exploitable" if f.get("is_exploitable") else "blind only"
+                parts.append(
+                    f"  • param={f['parameter']!r}  type={f['injection_type']!r}"
+                    f"  confidence={f['confidence']:.0%}  [{exploitable}]"
+                )
+                if f.get("payload"):
+                    parts.append(f"    payload: {f['payload'][:120]}")
+        elif summary.get('injection_found'):
             parts.append(f"[INJECTION FOUND] Payloads: {summary.get('payloads', [])}")
+
         if summary.get('dbms'):
             parts.append(f"[DBMS] {summary['dbms']}")
         if summary.get('waf_detected'):
-            parts.append(f"[WAF] Detected")
+            parts.append("[WAF] Detected")
         if summary.get('errors'):
             parts.append(f"[ERRORS] {'; '.join(summary['errors'][:3])}")
+
         parts.append("--- Output ---")
         parts.append(clean[:2000] if len(clean) > 2000 else clean)
-        
+
         return '\n'.join(parts)
     except Exception as e:
         return f"Error running SQLMap: {str(e)}"
