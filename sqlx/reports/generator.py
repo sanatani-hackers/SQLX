@@ -8,23 +8,25 @@ from sqlx.workspace.manager import WorkspaceManager
 from sqlx.analysis.http import analyzer
 
 class ReportGenerator:
-    def __init__(self, target_id: str):
+    def __init__(self, target_id: str, agent=None):
         self.target_manager = TargetManager()
         self.target = self.target_manager.load_target(target_id)
         if not self.target:
             raise ValueError(f"Target '{target_id}' not found.")
             
+        self.agent = agent
         self.workspace = WorkspaceManager(self.target.workspace_dir)
         self.report_dir = Path(self.target.workspace_dir).parent / "reports"
         self.report_dir.mkdir(parents=True, exist_ok=True)
         
-    def generate_data(self) -> Dict[str, Any]:
+    def generate_data(self, use_ai: bool = False, ai_summary: str = None, ai_risk_assessment: str = None, ai_remediation_steps: str = None) -> Dict[str, Any]:
         data = {
             "target": {
                 "id": self.target.id,
                 "name": self.target.name,
                 "url": self.target.target_url,
-                "created_at": self.target.created_at.isoformat()
+                "created_at": self.target.created_at.isoformat(),
+                "workspace_dir": self.target.workspace_dir
             },
             "generated_at": datetime.utcnow().isoformat(),
             "workspace_history": [],
@@ -51,75 +53,63 @@ class ReportGenerator:
                 "suspicious": analysis.get("suspicious_status")
             })
             
+        
+        if ai_summary or ai_risk_assessment or ai_remediation_steps:
+            data["ai_summary"] = ai_summary
+            data["ai_risk_assessment"] = ai_risk_assessment
+            data["ai_remediation_steps"] = ai_remediation_steps
+            # don't trigger the self.agent generation if provided
+            use_ai = False
+            
+        if use_ai and self.agent:
+            from sqlx.session.manager import SessionManager
+            sm = SessionManager()
+            sessions = sm.list_sessions(self.target.workspace_dir)
+            if sessions:
+                latest_session = sessions[-1]
+                findings = latest_session.findings
+                observations = latest_session.observations
+                
+                # We put findings in data so report formatters can use them
+                data["findings"] = findings
+                
+                prompt = (
+                    f"Write an executive summary, risk assessment, and remediation steps based on these findings: {findings} "
+                    f"and observations: {observations}. "
+                    "Format as JSON: {'ai_summary': '...', 'ai_risk_assessment': '...', 'ai_remediation_steps': '...'}"
+                )
+                try:
+                    # Depending on how the provider works
+                    if hasattr(self.agent, "provider"):
+                        resp = self.agent.provider.generate([{"role": "user", "content": prompt}])
+                        content = resp.content if hasattr(resp, "content") else str(resp)
+                    else:
+                        content = self.agent.ask(prompt)
+                    
+                    import re
+                    match = re.search(r'\{.*\}', content, re.DOTALL)
+                    if match:
+                        parsed = json.loads(match.group(0))
+                        data["ai_summary"] = parsed.get("ai_summary", "")
+                        data["ai_risk_assessment"] = parsed.get("ai_risk_assessment", "")
+                        data["ai_remediation_steps"] = parsed.get("ai_remediation_steps", "")
+                except Exception as e:
+                    print(f"AI generation failed: {e}")
+                    
         return data
 
-    def export_json(self) -> str:
-        data = self.generate_data()
+    def export_json(self, use_ai: bool = False, ai_summary: str = None, ai_risk_assessment: str = None, ai_remediation_steps: str = None) -> str:
+        from sqlx.reports.json import build_json_report
+        data = self.generate_data(use_ai=use_ai, ai_summary=ai_summary, ai_risk_assessment=ai_risk_assessment, ai_remediation_steps=ai_remediation_steps)
+        json_str = build_json_report(data)
         filename = self.report_dir / f"{self.target.name}_report_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}.json"
-        filename.write_text(json.dumps(data, indent=2))
+        filename.write_text(json_str)
         return str(filename)
 
-    def export_html(self) -> str:
-        data = self.generate_data()
-        
-        # Extremely lightweight HTML template without external dependencies
-        html = f"""<!DOCTYPE html>
-<html>
-<head>
-    <title>SQLX Audit Report: {data['target']['name']}</title>
-    <style>
-        body {{ font-family: -apple-system, system-ui, sans-serif; padding: 2rem; max-width: 1200px; margin: auto; background: #f9fafb; color: #111827; }}
-        h1 {{ border-bottom: 2px solid #2563eb; padding-bottom: 0.5rem; }}
-        .card {{ background: white; padding: 1.5rem; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 2rem; }}
-        table {{ width: 100%; border-collapse: collapse; margin-top: 1rem; }}
-        th, td {{ padding: 0.75rem; text-align: left; border-bottom: 1px solid #e5e7eb; }}
-        th {{ background: #f3f4f6; }}
-        .warning {{ background: #fef2f2; color: #991b1b; padding: 0.25rem 0.5rem; border-radius: 4px; font-size: 0.875em; }}
-        .badge-green {{ background: #dcfce7; color: #166534; padding: 0.25rem 0.5rem; border-radius: 4px; font-size: 0.875em; }}
-    </style>
-</head>
-<body>
-    <h1>SQLX Assessment Report</h1>
-    
-    <div class="card">
-        <h2>Target Overview</h2>
-        <p><strong>Name:</strong> {data['target']['name']}</p>
-        <p><strong>URL:</strong> {data['target']['url']}</p>
-        <p><strong>Generated:</strong> {data['generated_at']} UTC</p>
-    </div>
-
-    <div class="card">
-        <h2>AI Workspace Modifications</h2>
-        <table>
-            <tr><th>Hash</th><th>Date</th><th>Author</th><th>Message</th></tr>
-"""
-        for commit in data["workspace_history"]:
-            html += f"<tr><td><code>{commit['hash'][:8]}</code></td><td>{commit['date']}</td><td>{commit['author']}</td><td>{commit['message']}</td></tr>\n"
-            
-        html += """
-        </table>
-    </div>
-    
-    <div class="card">
-        <h2>Captured Proxy Traffic Summary</h2>
-        <table>
-            <tr><th>Method</th><th>URL</th><th>Status</th><th>Latency (ms)</th><th>Flags</th></tr>
-"""
-        for txn in data["traffic_summary"]:
-            flags = []
-            if txn["waf_detected"]: flags.append('<span class="warning">WAF</span>')
-            if txn["suspicious"]: flags.append('<span class="warning">SUSP</span>')
-            
-            status_cls = "badge-green" if str(txn['status']).startswith("2") else "warning" if str(txn['status']).startswith("4") else ""
-            
-            html += f"<tr><td>{txn['method']}</td><td><code>{txn['url'][:80]}</code></td><td><span class='{status_cls}'>{txn['status']}</span></td><td>{txn['latency_ms']:.1f}</td><td>{' '.join(flags)}</td></tr>\n"
-            
-        html += """
-        </table>
-    </div>
-</body>
-</html>
-"""
+    def export_html(self, use_ai: bool = False, ai_summary: str = None, ai_risk_assessment: str = None, ai_remediation_steps: str = None) -> str:
+        from sqlx.reports.html import build_html_report
+        data = self.generate_data(use_ai=use_ai, ai_summary=ai_summary, ai_risk_assessment=ai_risk_assessment, ai_remediation_steps=ai_remediation_steps)
+        html_str = build_html_report(data)
         filename = self.report_dir / f"{self.target.name}_report_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}.html"
-        filename.write_text(html)
+        filename.write_text(html_str)
         return str(filename)

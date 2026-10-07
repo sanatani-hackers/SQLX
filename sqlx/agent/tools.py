@@ -580,12 +580,24 @@ def save_session_finding(target_id: str, session_id: str, finding: str) -> str:
                 "type": "string",
                 "enum": ["html", "json"],
                 "description": "Output format for the report (default: 'html')."
+            },
+            "ai_summary": {
+                "type": "string",
+                "description": "Optional AI-generated executive summary to include in the report."
+            },
+            "ai_risk_assessment": {
+                "type": "string",
+                "description": "Optional AI-generated risk assessment."
+            },
+            "ai_remediation_steps": {
+                "type": "string",
+                "description": "Optional AI-generated remediation steps."
             }
         },
         "required": ["target_id"]
     }
 )
-def generate_report(target_id: str, format: str = "html") -> str:
+def generate_report(target_id: str, format: str = "html", ai_summary: str = None, ai_risk_assessment: str = None, ai_remediation_steps: str = None) -> str:
     """Generate an audit report for a target and return its file path.
 
     Delegates to :class:`sqlx.reports.generator.ReportGenerator`.
@@ -614,9 +626,9 @@ def generate_report(target_id: str, format: str = "html") -> str:
     fmt = (format or "html").strip().lower()
     try:
         if fmt == "json":
-            path = gen.export_json()
+            path = gen.export_json(ai_summary=ai_summary, ai_risk_assessment=ai_risk_assessment, ai_remediation_steps=ai_remediation_steps)
         else:
-            path = gen.export_html()
+            path = gen.export_html(ai_summary=ai_summary, ai_risk_assessment=ai_risk_assessment, ai_remediation_steps=ai_remediation_steps)
         return f"Report generated successfully: {path}"
     except Exception as exc:
         return f"Error generating report: {exc}"

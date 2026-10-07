@@ -114,7 +114,7 @@ class InteractiveDashboard:
                                     else self._show_session()),
             "/sessions":    lambda: self._list_sessions(),
             "/resume":      lambda: self._resume_session(parts[1] if len(parts) > 1 else None),
-            "/report":      lambda: self._generate_report(parts[1] if len(parts) > 1 else "html"),
+            "/report":      lambda: self._generate_report(" ".join(parts[1:]) if len(parts) > 1 else "html"),
             "/fingerprint": lambda: self._fingerprint_last_traffic(),
             "/replay":      lambda: self._replay_request(int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None),
             "/compare":     lambda: self._compare_requests(
@@ -459,14 +459,19 @@ class InteractiveDashboard:
 
     # ── report ─────────────────────────────────────────────────────────────────
 
-    def _generate_report(self, fmt: str):
+    def _generate_report(self, args: str):
         if not self.active_target:
             console.print("[yellow]Select a target first (/target <name>).[/yellow]")
             return
+        
+        args = args.lower().strip()
+        use_ai = "ai" in args.split()
+        fmt = "json" if "json" in args.split() else "html"
+
         from sqlx.reports.generator import ReportGenerator
-        with console.status("[bold cyan]Generating report…[/bold cyan]"):
-            gen = ReportGenerator(self.active_target.id)
-            path = gen.export_json() if fmt == "json" else gen.export_html()
+        with console.status(f"[bold cyan]Generating {fmt.upper()} report{' with AI sections' if use_ai else ''}…[/bold cyan]"):
+            gen = ReportGenerator(self.active_target.id, agent=self.agent)
+            path = gen.export_json(use_ai=use_ai) if fmt == "json" else gen.export_html(use_ai=use_ai)
         console.print(f"[dark_green]✔  Report saved:[/dark_green] [blue]{path}[/blue]")
 
     # ── TUI shortcut ───────────────────────────────────────────────────────────

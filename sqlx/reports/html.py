@@ -58,6 +58,8 @@ _TEMPLATE = """<!DOCTYPE html>
   </table>
 </div>
 
+{ai_section}
+
 <div class="card">
   <h2>Findings ({findings_count})</h2>
   {findings_section}
@@ -75,11 +77,26 @@ _TEMPLATE = """<!DOCTYPE html>
 
 
 def build_html_report(data: Dict[str, Any]) -> str:
-    """Build a full HTML report string from a report data dict."""
+    \"\"\"Build a full HTML report string from a report data dict.\"\"\"
     target  = data.get("target", {})
     findings = data.get("findings", [])
     history  = data.get("workspace_history", [])
     traffic  = data.get("recent_traffic", [])
+    
+    ai_summary = data.get("ai_summary")
+    ai_risk = data.get("ai_risk_assessment")
+    ai_remediation = data.get("ai_remediation_steps")
+    
+    ai_section = ""
+    if ai_summary or ai_risk or ai_remediation:
+        ai_section = '<div class="card">\n<h2>AI Executive Summary</h2>\n'
+        if ai_summary:
+            ai_section += f'<h3>Summary</h3>\n<p>{ai_summary}</p>\n'
+        if ai_risk:
+            ai_section += f'<h3>Risk Assessment</h3>\n<p>{ai_risk}</p>\n'
+        if ai_remediation:
+            ai_section += f'<h3>Remediation Steps</h3>\n<p>{ai_remediation}</p>\n'
+        ai_section += '</div>\n'
 
     # Findings table
     if findings:
@@ -104,7 +121,7 @@ def build_html_report(data: Dict[str, Any]) -> str:
     # Optional proxy section
     if traffic:
         rows = "".join(
-            f"<tr><td>{t.get('method','')}</td>"
+            f"<tr><td>{t.get('method','')[:10]}</td>"
             f"<td>{t.get('url','')[:80]}</td>"
             f"<td>{t.get('status','')}</td>"
             f"<td>{t.get('latency_ms',0):.1f}ms</td></tr>"
@@ -124,6 +141,7 @@ def build_html_report(data: Dict[str, Any]) -> str:
         target_url=target.get("target_url", ""),
         workspace_dir=target.get("workspace_dir", ""),
         generated_at=format_timestamp(),
+        ai_section=ai_section,
         findings_count=len(findings),
         findings_section=findings_section,
         commits_count=len(history),
