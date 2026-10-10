@@ -1,3 +1,5 @@
+#Note: This is still in development so the project is so cluttered with deadcode and temporary test files just ignore them.
+
 # SQLX — AI-Powered SQLMap Agent
 
 SQLX is an AI-powered orchestration layer built around the original SQLMap project.
